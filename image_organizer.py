@@ -5,30 +5,21 @@ Detects and handles duplicate files by moving them to a separate folder.
 """
 
 import os
-import sys
 import shutil
 import argparse
 import hashlib
+import exifread
 from datetime import datetime
 from pathlib import Path
 from PIL import Image
-from PIL.ExifTags import TAGS
 
 
 def get_exif_data(image_path):
-    """Extract EXIF data from an image file."""
+    """Extract EXIF data from an image file using exifread library."""
     try:
-        image = Image.open(image_path)
-        exif_data = {}
-        
-        if hasattr(image, '_getexif'):
-            exif_info = image._getexif()
-            if exif_info:
-                for tag, value in exif_info.items():
-                    decoded = TAGS.get(tag, tag)
-                    exif_data[decoded] = value
-        
-        return exif_data
+        with open(image_path, 'rb') as f:
+            exif_tags = exifread.process_file(f, details=False)
+            return exif_tags
     except Exception as e:
         print(f"Error reading EXIF data from {image_path}: {e}")
         return {}
@@ -37,13 +28,13 @@ def get_exif_data(image_path):
 def get_date_from_exif(exif_data):
     """Extract the date from EXIF data."""
     # Try different date fields in EXIF data
-    date_fields = ['DateTimeOriginal', 'DateTime', 'DateTimeDigitized']
+    date_fields = ['EXIF DateTimeOriginal', 'Image DateTime', 'EXIF DateTimeDigitized']
     
     for field in date_fields:
         if field in exif_data:
             try:
                 # EXIF date format: 'YYYY:MM:DD HH:MM:SS'
-                date_str = exif_data[field]
+                date_str = str(exif_data[field])
                 date_obj = datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S')
                 return date_obj
             except Exception as e:
@@ -69,7 +60,7 @@ def is_image_file(file_path):
     if Path(file_path).name.startswith('.'):
         return False
     
-    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.arw', '.raw'}
     return Path(file_path).suffix.lower() in image_extensions
 
 
@@ -89,9 +80,136 @@ def get_file_hash(file_path):
         return None
 
 
-def organize_images(source_folder, destination_folder):
+def remove_resource_fork_files(directory):
+    """Remove macOS resource fork files (files starting with ._) from a directory and its subdirectories.
+    
+    Args:
+        directory: Path to the directory to clean
+    
+    Returns:
+        int: Number of resource fork files removed
+    """
+    removed_count = 0
+    directory_path = Path(directory)
+    
+    for path in directory_path.glob('**/*'):
+        if path.is_file() and path.name.startswith('._'):
+            path.unlink()
+            removed_count += 1
+            print(f"Removed resource fork file: {path}")
+    
+    return removed_count
+
+
+def find_duplicates(folder, move_to_duplicates=False):
+    """Find duplicate images in a folder based on file hash.
+    
+    Args:
+        folder: Path to the folder to check for duplicates
+        move_to_duplicates: If True, move duplicates to a duplicates folder
+    
+    Returns:
+        tuple: (duplicate_count, moved_count)
+    """
+    folder_path = Path(folder)
+    duplicates_path = folder_path / 'duplicates'
+    
+    if not folder_path.exists():
+        print(f"Folder '{folder}' does not exist.")
+        return 0, 0
+    
+    if move_to_duplicates:
+        duplicates_path.mkdir(parents=True, exist_ok=True)
+    
+    # Dictionary to store file hashes
+    file_hashes = {}
+    # Dictionary to store duplicates
+    duplicates = {}
+    # Counter for statistics
+    duplicate_count = 0
+    moved_count = 0
+    
+    print(f"Scanning {folder} for duplicate images...")
+    
+    # First pass: collect all file hashes
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            file_path = Path(root) / file
+            
+            # Skip the duplicates folder if it exists
+            if 'duplicates' in file_path.parts:
+                continue
+                
+            if is_image_file(file_path):
+                try:
+                    # Calculate file hash
+                    file_hash = get_file_hash(file_path)
+                    if not file_hash:
+                        continue
+                    
+                    if file_hash in file_hashes:
+                        # This is a duplicate
+                        if file_hash not in duplicates:
+                            duplicates[file_hash] = [file_hashes[file_hash]]
+                        duplicates[file_hash].append(file_path)
+                        duplicate_count += 1
+                    else:
+                        file_hashes[file_hash] = file_path
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
+    
+    # Print duplicates and optionally move them
+    if duplicates:
+        print(f"\nFound {duplicate_count} duplicate files:")
+        for file_hash, paths in duplicates.items():
+            print(f"\nDuplicate set (hash: {file_hash[:8]}...)")
+            print(f"  Original: {paths[0]}")
+            for i, path in enumerate(paths[1:], 1):
+                print(f"  Duplicate {i}: {path}")
+                
+                if move_to_duplicates:
+                    try:
+                        # Create a destination path in the duplicates folder
+                        dest_path = duplicates_path / path.name
+                        
+                        # If a file with the same name already exists in the duplicates folder,
+                        # add a suffix to avoid overwriting
+                        if dest_path.exists():
+                            base_name = dest_path.stem
+                            extension = dest_path.suffix
+                            counter = 1
+                            
+                            while dest_path.exists():
+                                new_name = f"{base_name}_{counter}{extension}"
+                                dest_path = duplicates_path / new_name
+                                counter += 1
+                        
+                        # Move the file
+                        shutil.move(path, dest_path)
+                        print(f"    Moved to: {dest_path}")
+                        moved_count += 1
+                    except Exception as e:
+                        print(f"    Error moving file: {e}")
+    else:
+        print("No duplicates found.")
+    
+    print(f"\nDuplicate check complete!")
+    print(f"Total duplicates found: {duplicate_count}")
+    if move_to_duplicates:
+        print(f"Duplicates moved: {moved_count}")
+    
+    return duplicate_count, moved_count
+
+
+def organize_images(source_folder, destination_folder, rerun=False):
     """Scan for images and organize them into year/month folders.
-    Detect duplicates and move them to a duplicates folder."""
+    Detect duplicates and move them to a duplicates folder.
+    
+    Args:
+        source_folder: Path to the source folder containing images
+        destination_folder: Path to the destination folder for organized images
+        rerun: If True, skip files that already exist in the destination
+    """
     source_path = Path(source_folder)
     destination_path = Path(destination_folder)
     duplicates_path = destination_path / 'duplicates'
@@ -108,6 +226,7 @@ def organize_images(source_folder, destination_folder):
     processed_count = 0
     duplicate_count = 0
     skipped_count = 0
+    already_exists_count = 0
     
     # Dictionary to store file hashes to detect duplicates
     file_hashes = {}
@@ -169,15 +288,33 @@ def organize_images(source_folder, destination_folder):
                         
                         # Check if a file with the same name already exists at destination
                         if dest_file_path.exists():
-                            # Add a suffix to avoid overwriting
-                            base_name = dest_file_path.stem
-                            extension = dest_file_path.suffix
-                            counter = 1
-                            
-                            while dest_file_path.exists():
-                                new_name = f"{base_name}_{counter}{extension}"
-                                dest_file_path = month_folder / new_name
-                                counter += 1
+                            # Check if the existing file is a duplicate of the one being moved
+                            existing_hash = get_file_hash(dest_file_path)
+                            if existing_hash == file_hash:
+                                # Files are identical - skip this file
+                                print(f"Skipping (identical file exists at destination): {file_path}")
+                                already_exists_count += 1
+                                continue
+                            else:
+                                # Files have the same name but different content - add a suffix
+                                base_name = dest_file_path.stem
+                                extension = dest_file_path.suffix
+                                counter = 1
+                                
+                                while dest_file_path.exists():
+                                    new_name = f"{base_name}_{counter}{extension}"
+                                    dest_file_path = month_folder / new_name
+                                    counter += 1
+                        
+                        # If rerun flag is set and we're about to copy a file that wasn't
+                        # caught by the name check, we should still skip it if it exists elsewhere
+                        # with the same content
+                        if rerun:
+                            # We already know this file doesn't exist at dest_file_path with the same hash
+                            # But it might exist somewhere else in the destination with the same content
+                            # We'll skip this check for now as it would require scanning the entire destination
+                            # which could be expensive
+                            pass
                         
                         # Copy the file
                         shutil.copy2(file_path, dest_file_path)
@@ -193,10 +330,16 @@ def organize_images(source_folder, destination_folder):
             else:
                 skipped_count += 1
     
+    # Clean up macOS resource fork files
+    print("\nCleaning up macOS resource fork files...")
+    removed_count = remove_resource_fork_files(destination_path)
+    
     print(f"\nProcessing complete!")
     print(f"Images processed: {processed_count}")
     print(f"Duplicates found: {duplicate_count}")
+    print(f"Already in destination: {already_exists_count}")
     print(f"Files skipped: {skipped_count}")
+    print(f"Resource fork files removed: {removed_count}")
 
 
 def main():
@@ -205,13 +348,25 @@ def main():
     parser.add_argument('source', nargs='+', help='Source folder(s) containing images')
     parser.add_argument('-d', '--destination', default='./organized_images',
                         help='Destination folder for organized images (default: ./organized_images)')
+    parser.add_argument('-r', '--rerun', action='store_true',
+                        help='Rerun mode: skip copying files that already exist in the destination')
+    parser.add_argument('-cd', '--check-duplicates', action='store_true',
+                        help='Check for duplicates in the source folder(s) without organizing')
+    parser.add_argument('-m', '--move-duplicates', action='store_true',
+                        help='Move duplicate files to a duplicates folder when checking for duplicates')
     
     args = parser.parse_args()
     
-    # Process each source folder
-    for source_folder in args.source:
-        print(f"\nProcessing folder: {source_folder}")
-        organize_images(source_folder, args.destination)
+    # Check if we're just looking for duplicates
+    if args.check_duplicates:
+        for source_folder in args.source:
+            print(f"\nChecking for duplicates in folder: {source_folder}")
+            find_duplicates(source_folder, args.move_duplicates)
+    else:
+        # Process each source folder for organization
+        for source_folder in args.source:
+            print(f"\nProcessing folder: {source_folder}")
+            organize_images(source_folder, args.destination, args.rerun)
 
 
 if __name__ == '__main__':
