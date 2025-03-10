@@ -169,8 +169,15 @@ def find_duplicates(folder, move_to_duplicates=False):
                 
                 if move_to_duplicates:
                     try:
-                        # Create a destination path in the duplicates folder
-                        dest_path = duplicates_path / path.name
+                        # Get the source directory name
+                        source_dir_name = path.parent.name
+                        
+                        # Create a subdirectory in the duplicates folder with the same name as the source directory
+                        subdir_path = duplicates_path / source_dir_name
+                        subdir_path.mkdir(parents=True, exist_ok=True)
+                        
+                        # Create a destination path in the duplicates folder subdirectory
+                        dest_path = subdir_path / path.name
                         
                         # If a file with the same name already exists in the duplicates folder,
                         # add a suffix to avoid overwriting
@@ -181,7 +188,7 @@ def find_duplicates(folder, move_to_duplicates=False):
                             
                             while dest_path.exists():
                                 new_name = f"{base_name}_{counter}{extension}"
-                                dest_path = duplicates_path / new_name
+                                dest_path = subdir_path / new_name
                                 counter += 1
                         
                         # Move the file
@@ -201,7 +208,59 @@ def find_duplicates(folder, move_to_duplicates=False):
     return duplicate_count, moved_count
 
 
-def organize_images(source_folder, destination_folder, rerun=False):
+def add_prefix_to_files(folder, prefix):
+    """Add a prefix to all image files in a folder and its subfolders.
+    
+    Args:
+        folder: Path to the folder containing images
+        prefix: Prefix to add to filenames
+    
+    Returns:
+        int: Number of files renamed
+    """
+    if not prefix:
+        print("No prefix specified. Skipping rename operation.")
+        return 0
+    
+    folder_path = Path(folder)
+    
+    if not folder_path.exists():
+        print(f"Folder '{folder}' does not exist.")
+        return 0
+    
+    renamed_count = 0
+    
+    print(f"Adding prefix '{prefix}' to files in {folder}...")
+    
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            file_path = Path(root) / file
+            
+            if is_image_file(file_path):
+                try:
+                    # Skip files that already have the prefix
+                    if file.startswith(f"{prefix}_"):
+                        continue
+                    
+                    # Create new filename with prefix
+                    new_name = f"{prefix}_{file}"
+                    new_path = file_path.parent / new_name
+                    
+                    # Rename the file
+                    file_path.rename(new_path)
+                    print(f"Renamed: {file_path} -> {new_path}")
+                    renamed_count += 1
+                    
+                except Exception as e:
+                    print(f"Error renaming {file_path}: {e}")
+    
+    print(f"\nRename operation complete!")
+    print(f"Files renamed: {renamed_count}")
+    
+    return renamed_count
+
+
+def organize_images(source_folder, destination_folder, rerun=False, tag_prefix=None):
     """Scan for images and organize them into year/month folders.
     Detect duplicates and move them to a duplicates folder.
     
@@ -209,6 +268,7 @@ def organize_images(source_folder, destination_folder, rerun=False):
         source_folder: Path to the source folder containing images
         destination_folder: Path to the destination folder for organized images
         rerun: If True, skip files that already exist in the destination
+        tag_prefix: Optional prefix to add to filenames when copying
     """
     source_path = Path(source_folder)
     destination_path = Path(destination_folder)
@@ -255,7 +315,16 @@ def organize_images(source_folder, destination_folder, rerun=False):
                     if file_hash in file_hashes:
                         # This is a duplicate - move to duplicates folder
                         original_path = file_hashes[file_hash]
-                        dup_dest_path = duplicates_path / f"{date.year}_{date.month:02d}_{file_path.name}"
+                        
+                        # Get the source directory name
+                        source_dir_name = file_path.parent.name
+                        
+                        # Create a subdirectory in the duplicates folder with the same name as the source directory
+                        subdir_path = duplicates_path / source_dir_name
+                        subdir_path.mkdir(parents=True, exist_ok=True)
+                        
+                        # Create destination path with year/month prefix in the subdirectory
+                        dup_dest_path = subdir_path / f"{date.year}_{date.month:02d}_{file_path.name}"
                         
                         # If the duplicate file already exists, add a suffix
                         if dup_dest_path.exists():
@@ -265,7 +334,7 @@ def organize_images(source_folder, destination_folder, rerun=False):
                             
                             while dup_dest_path.exists():
                                 new_name = f"{base_name}_{counter}{extension}"
-                                dup_dest_path = duplicates_path / new_name
+                                dup_dest_path = subdir_path / new_name
                                 counter += 1
                         
                         # Copy the duplicate file to the duplicates folder
@@ -316,10 +385,24 @@ def organize_images(source_folder, destination_folder, rerun=False):
                             # which could be expensive
                             pass
                         
-                        # Copy the file
-                        shutil.copy2(file_path, dest_file_path)
-                        print(f"Copied: {file_path} -> {dest_file_path}")
-                        processed_count += 1
+                        # If tag prefix is specified, rename the destination file
+                        if tag_prefix:
+                            # Create new filename with prefix
+                            prefixed_name = f"{tag_prefix}_{dest_file_path.name}"
+                            prefixed_path = dest_file_path.parent / prefixed_name
+                            
+                            # Copy the file with the new prefixed name
+                            shutil.copy2(file_path, prefixed_path)
+                            print(f"Copied with prefix: {file_path} -> {prefixed_path}")
+                            processed_count += 1
+                            
+                            # Update the destination path for hash tracking
+                            dest_file_path = prefixed_path
+                        else:
+                            # Copy the file without prefix
+                            shutil.copy2(file_path, dest_file_path)
+                            print(f"Copied: {file_path} -> {dest_file_path}")
+                            processed_count += 1
                         
                         # Store the hash and path for future duplicate detection
                         file_hashes[file_hash] = dest_file_path
@@ -352,13 +435,21 @@ def main():
                         help='Rerun mode: skip copying files that already exist in the destination')
     parser.add_argument('-cd', '--check-duplicates', action='store_true',
                         help='Check for duplicates in the source folder(s) without organizing')
-    parser.add_argument('-m', '--move-duplicates', action='store_true',
-                        help='Move duplicate files to a duplicates folder when checking for duplicates')
+    parser.add_argument('-m', '--move-duplicates', metavar='DIR', nargs='?', const='./duplicates', default=None,
+                        help='Move duplicate files to specified directory (default: ./duplicates)')
+    parser.add_argument('-t', '--tag', metavar='PREFIX',
+                        help='Add specified prefix to filenames when organizing')
+    parser.add_argument('-u', '--update-folder', metavar='FOLDER',
+                        help='Update all image files in specified folder with the tag prefix')
     
     args = parser.parse_args()
     
+    # Check if we're updating a folder with tag prefixes
+    if args.update_folder and args.tag:
+        print(f"\nUpdating folder with tag prefix: {args.update_folder}")
+        add_prefix_to_files(args.update_folder, args.tag)
     # Check if we're just looking for duplicates
-    if args.check_duplicates:
+    elif args.check_duplicates:
         for source_folder in args.source:
             print(f"\nChecking for duplicates in folder: {source_folder}")
             find_duplicates(source_folder, args.move_duplicates)
@@ -366,7 +457,7 @@ def main():
         # Process each source folder for organization
         for source_folder in args.source:
             print(f"\nProcessing folder: {source_folder}")
-            organize_images(source_folder, args.destination, args.rerun)
+            organize_images(source_folder, args.destination, args.rerun, args.tag)
 
 
 if __name__ == '__main__':
