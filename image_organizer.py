@@ -11,7 +11,7 @@ import hashlib
 import exifread
 from datetime import datetime
 from pathlib import Path
-from PIL import Image
+
 
 
 def get_exif_data(image_path):
